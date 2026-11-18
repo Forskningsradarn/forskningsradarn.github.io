@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/">
+ <channel>
+  <title>DEMO: Exempel på RSS med artikelbilder</title>
+  <link>https://example.org/science</link>
+  <description>Enbart ett tekniskt testflöde – innehåller inga verkliga nyheter.</description>
+  <item>
+   <title>TESTARTIKEL: Nya mätningar av klimatet</title>
+   <link>https://example.org/article-one</link>
+   <description>Exempel på hur en artikel med bildmetadata importeras i appen.</description>
+   <pubDate>Thu, 12 Nov 2026 12:00:00 GMT</pubDate>
+   <media:content url="https://example.org/images/climate.jpg" width="1200" medium="image">
+    <media:description>Exempelbild, fiktiv länk</media:description>
+    <media:copyright>Testdata</media:copyright>
+   </media:content>
+  </item>
+  <item>
+   <title>TESTARTIKEL: Nya rön om hjärnan</title>
+   <link>https://example.org/article-two</link>
+   <description>Artikel utan bild ger en ämnesikon i stället.</description>
+   <pubDate>Fri, 13 Nov 2026 07:00:00 GMT</pubDate>
+  </item>
+ </channel>
+</rss>
