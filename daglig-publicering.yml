@@ -1,0 +1,58 @@
+name: Forskningsradarn - daglig publicering 06.15
+on:
+  schedule:
+    - cron: '15 6 * * *'
+      timezone: 'Europe/Stockholm'
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: forskningsradarn-offentlig-daglig
+  cancel-in-progress: false
+jobs:
+  nyhetsinsamling:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Hamta projektet
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - name: Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Testa hämtarens kod
+        run: python -m unittest discover -s tests -v
+      - name: Hämta och uppdatera nyhetsdata
+        run: python scripts/update_feeds.py --once-per-day
+      - name: Sammanfatta källstatus
+        if: always()
+        run: |
+          if test -f test-output/source_status.json; then
+            python scripts/report_sources.py
+            cat test-output/rapport.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'Redan hämtat i dag enligt svensk tid.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Publicera endast uppdaterade nyhetsdata
+        run: |
+          if git diff --quiet -- data/articles.json; then
+            echo 'Ingen ändring av artikeldata.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add data/articles.json
+          git commit -m 'Forskningsradarn: dagliga nyheter'
+          git push
+      - name: Spara källrapport
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kallrapport-${{ github.run_number }}
+          path: |
+            test-output/rapport.md
+            test-output/kallstatus.csv
+          if-no-files-found: ignore
+          retention-days: 7
