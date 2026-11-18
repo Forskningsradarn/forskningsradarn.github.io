@@ -1,58 +1,91 @@
-name: Forskningsradarn - daglig publicering 06.15
+name: Forskningsradarn - hamta och publicera dagligen
+
 on:
   schedule:
     - cron: '15 6 * * *'
       timezone: 'Europe/Stockholm'
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'index.html'
+      - 'assets/**'
+      - 'data/sources.json'
+      - 'data/articles.json'
+      - '.github/workflows/daglig-publicering.yml'
+
 permissions:
   contents: write
+  pages: write
+  id-token: write
+
 concurrency:
-  group: forskningsradarn-offentlig-daglig
+  group: forskningsradarn-pages
   cancel-in-progress: false
+
 jobs:
-  nyhetsinsamling:
+  samla-och-publicera:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
     steps:
-      - name: Hamta projektet
-        uses: actions/checkout@v4
+      - name: Hamta webbplatsens filer
+        uses: actions/checkout@v6
         with:
           persist-credentials: true
-      - name: Python 3.12
-        uses: actions/setup-python@v5
+
+      - name: Installera Python 3.12
+        uses: actions/setup-python@v6
         with:
           python-version: '3.12'
-      - name: Testa hämtarens kod
+
+      - name: Kontrollera hamtaren
         run: python -m unittest discover -s tests -v
-      - name: Hämta och uppdatera nyhetsdata
+
+      - name: Hamta nya artiklar (högst en gång per svensk kalenderdag)
         run: python scripts/update_feeds.py --once-per-day
-      - name: Sammanfatta källstatus
+
+      - name: Visa hur insamlingen gick
         if: always()
         run: |
           if test -f test-output/source_status.json; then
             python scripts/report_sources.py
             cat test-output/rapport.md >> "$GITHUB_STEP_SUMMARY"
           else
-            echo 'Redan hämtat i dag enligt svensk tid.' >> "$GITHUB_STEP_SUMMARY"
+            echo 'Redan hamtat idag eller ingen ny kallrapport skapades.' >> "$GITHUB_STEP_SUMMARY"
           fi
-      - name: Publicera endast uppdaterade nyhetsdata
+
+      - name: Spara artikelhistoriken till GitHub
         run: |
           if git diff --quiet -- data/articles.json; then
-            echo 'Ingen ändring av artikeldata.'
-            exit 0
+            echo 'Inga nya andringar i article-data.'
+          else
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add data/articles.json
+            git commit -m 'Forskningsradarn: uppdatera nyhetsdata'
+            git push
           fi
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add data/articles.json
-          git commit -m 'Forskningsradarn: dagliga nyheter'
-          git push
-      - name: Spara källrapport
-        if: always()
-        uses: actions/upload-artifact@v4
+
+      - name: Skapa webbplatsens publiceringsmapp
+        run: |
+          mkdir -p public_site/assets public_site/data
+          cp index.html public_site/index.html
+          cp assets/app.js assets/styles.css public_site/assets/
+          cp data/articles.json data/sources.json public_site/data/
+          touch public_site/.nojekyll
+
+      - name: Forbered GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Ladda upp webbplatsen
+        uses: actions/upload-pages-artifact@v3
         with:
-          name: kallrapport-${{ github.run_number }}
-          path: |
-            test-output/rapport.md
-            test-output/kallstatus.csv
-          if-no-files-found: ignore
-          retention-days: 7
+          path: public_site
+
+      - name: Publicera pa GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
