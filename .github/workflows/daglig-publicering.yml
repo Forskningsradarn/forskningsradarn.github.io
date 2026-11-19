@@ -1,10 +1,20 @@
-name: Forskningsradarn - hamta och publicera dagligen
+name: Forskningsradarn - testa automatiska hamtningstider
 
 on:
+  # Tidsbaserade provkorningar, svensk lokal tid. Inga manuella starter behovs.
   schedule:
-    - cron: '15 6 * * *'
+    - cron: '17 6 * * *'
+      timezone: 'Europe/Stockholm'
+    - cron: '27 10 * * *'
+      timezone: 'Europe/Stockholm'
+    - cron: '37 13 * * *'
+      timezone: 'Europe/Stockholm'
+    - cron: '47 17 * * *'
+      timezone: 'Europe/Stockholm'
+    - cron: '7 21 * * *'
       timezone: 'Europe/Stockholm'
   workflow_dispatch:
+  # Filandringar publicerar webbplatsen, men gor ingen ny RSS-insamling.
   push:
     branches: [main]
     paths:
@@ -45,28 +55,119 @@ jobs:
       - name: Kontrollera hamtaren
         run: python -m unittest discover -s tests -v
 
-      - name: Hamta nya artiklar (högst en gång per svensk kalenderdag)
-        run: python scripts/update_feeds.py --once-per-day
+      - name: Registrera start och artikelantal fore hamtning
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: |
+          python - <<'PY'
+          import json
+          from datetime import datetime
+          from pathlib import Path
+          from zoneinfo import ZoneInfo
+          f = Path('data/articles.json')
+          old = json.loads(f.read_text(encoding='utf-8')) if f.exists() else {}
+          snapshot = {
+              'start_sv': datetime.now(ZoneInfo('Europe/Stockholm')).isoformat(timespec='seconds'),
+              'ids': [a['id'] for a in old.get('articles', []) if a.get('id')]
+          }
+          Path('/tmp/forskningsradarn-before.json').write_text(json.dumps(snapshot), encoding='utf-8')
+          PY
 
-      - name: Visa hur insamlingen gick
+      - name: Hamta forskningsnyheter vid schemalagd tid
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        # Under testperioden hamtar vi vid varje planerad tid (ingen dygnssparr).
+        run: python scripts/update_feeds.py
+
+      - name: Mat resultat och spara korningshistorik
         if: always()
+        env:
+          TRIGGER: ${{ github.event_name }}
+          SCHEDULE: ${{ github.event.schedule }}
         run: |
-          if test -f test-output/source_status.json; then
-            python scripts/report_sources.py
-            cat test-output/rapport.md >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo 'Redan hamtat idag eller ingen ny kallrapport skapades.' >> "$GITHUB_STEP_SUMMARY"
-          fi
+          python - <<'PY'
+          import csv
+          import json
+          import os
+          from datetime import datetime, timedelta, timezone
+          from pathlib import Path
+          from zoneinfo import ZoneInfo
 
-      - name: Spara artikelhistoriken till GitHub
+          event = os.environ.get('TRIGGER', '')
+          planned = os.environ.get('SCHEDULE', '')
+          summary = Path(os.environ['GITHUB_STEP_SUMMARY'])
+          with summary.open('a', encoding='utf-8') as fp:
+              fp.write('# Forskningsradarn – automatisk tidstest\n\n')
+              fp.write(f'**Utlösare:** `{event}`. **Planerad cron:** `{planned or "ej schemalagd"}`.\n\n')
+
+          if event == 'push':
+              with summary.open('a', encoding='utf-8') as fp:
+                  fp.write('En kodandring publicerade webbplatsen utan att hamta RSS. Detta raknas inte som ett schematest.\n')
+              raise SystemExit(0)
+
+          before_file = Path('/tmp/forskningsradarn-before.json')
+          status_file = Path('test-output/source_status.json')
+          if not before_file.exists() or not status_file.exists():
+              with summary.open('a', encoding='utf-8') as fp:
+                  fp.write('Hamtningen saknar komplett underlag. Kontrollera tidigare steg.\n')
+              raise SystemExit(0)
+
+          before = json.loads(before_file.read_text(encoding='utf-8'))
+          after = json.loads(Path('data/articles.json').read_text(encoding='utf-8'))
+          status = json.loads(status_file.read_text(encoding='utf-8'))
+          old_ids = set(before['ids'])
+          new_articles = [a for a in after.get('articles', []) if a.get('id') not in old_ids]
+          now = datetime.now(timezone.utc)
+
+          def published_last_day(a):
+              try:
+                  dt = datetime.fromisoformat(str(a.get('published', '')).replace('Z', '+00:00'))
+                  if dt.tzinfo is None:
+                      return False
+                  return timedelta(0) <= now - dt <= timedelta(hours=24)
+              except (ValueError, TypeError):
+                  return False
+
+          recent_new = sum(published_last_day(a) for a in new_articles)
+          source_status = status.get('source_status', {})
+          successes = sum(bool(s.get('ok')) for s in source_status.values())
+          failures = sum(bool(s.get('reason')) and s.get('reason') != 'Inte inkopplad för hämtning' for s in source_status.values())
+          finished = datetime.now(ZoneInfo('Europe/Stockholm')).isoformat(timespec='seconds')
+
+          history = Path('data/korningshistorik.csv')
+          fields = ['start_sv','klar_sv','trigger','planerad_cron','kallor_ok','kallor_fel','artiklar_totalt','nya_i_arkivet','nya_publicerade_24h']
+          history.parent.mkdir(parents=True, exist_ok=True)
+          with history.open('a', encoding='utf-8', newline='') as fp:
+              writer = csv.DictWriter(fp, fieldnames=fields)
+              if fp.tell() == 0:
+                  writer.writeheader()
+              writer.writerow({
+                  'start_sv': before['start_sv'], 'klar_sv': finished,
+                  'trigger': event, 'planerad_cron': planned,
+                  'kallor_ok': successes, 'kallor_fel': failures,
+                  'artiklar_totalt': len(after.get('articles', [])),
+                  'nya_i_arkivet': len(new_articles),
+                  'nya_publicerade_24h': recent_new
+              })
+          with summary.open('a', encoding='utf-8') as fp:
+              fp.write(f'**Start (Sverige):** {before["start_sv"]}  \n')
+              fp.write(f'**Klart (Sverige):** {finished}  \n')
+              fp.write(f'**Fungerande källor:** {successes}  \n')
+              fp.write(f'**Källor med fel:** {failures}  \n')
+              fp.write(f'**Artiklar i databasen:** {len(after.get("articles", []))}  \n')
+              fp.write(f'**Nya artiklar i databasen sedan föregående insamling:** {len(new_articles)}  \n')
+              fp.write(f'**Av dessa, publicerade senaste 24 h:** {recent_new}  \n\n')
+              fp.write('Resultaten sparas också i `data/korningshistorik.csv`. Schemalagd start kan avvika från angiven tid.\n')
+          PY
+
+      - name: Spara nyheter och testhistorik i GitHub
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         run: |
-          if git diff --quiet -- data/articles.json; then
-            echo 'Inga nya andringar i article-data.'
+          git add data/articles.json data/korningshistorik.csv
+          if git diff --cached --quiet; then
+            echo 'Ingen andring att spara.'
           else
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git add data/articles.json
-            git commit -m 'Forskningsradarn: uppdatera nyhetsdata'
+            git commit -m 'Forskningsradarn: tidsstyrd uppdatering'
             git push
           fi
 
